@@ -3,27 +3,20 @@
 """
 Flask Backend Server for ML-Augmented WAF
 Naval Innovathon 2025
-- Restful API endpoints
-- WebSocket support for real-time updates
-- ML model integration
-- Attack simulation
-- Rule generation
+
+UPDATED: State (metrics, anomalies, rules) is NO LONGER stored on server.
+         Dashboard resets on every page reload / new session.
+         Only detection logic remains on server.
+         Client (main.js) must now manage counters, lists and display.
 """
 
-from flask import Flask, render_template, jsonify, request, send_from_directory
+from flask import Flask, jsonify, request, send_from_directory
 from flask_socketio import SocketIO, emit
 from flask_cors import CORS
-import numpy as np
-import pandas as pd
-import joblib
-import json
-import os
-from datetime import datetime
-import time
-from pathlib import Path
-import logging
-from threading import Thread
 import random
+import time
+from datetime import datetime
+import logging
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -39,33 +32,6 @@ CORS(app, resources={r"/*": {"origins": "*"}})
 
 # Initialize SocketIO
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode="eventlet")
-
-# Global variables
-model_loaded = False
-feature_extractor = None
-detector = None 
-anomalies_list = []
-suggested_rules = []
-waf_rules = []
-metrics_data = {
-    'total_requests': 0,
-    'anomalies_detected': 0,
-    'false_positives': 0,
-    'avg_latency': 0.0,
-    'detection_accuracy': 98.3,
-    'false_positive_rate': 2.1,
-    'throughput': 12000,
-    'blocked_requests': 0
-}
-
-# Create necessary directories
-os.makedirs('models', exist_ok=True)
-os.makedirs('logs', exist_ok=True)
-os.makedirs('static/css', exist_ok=True)
-os.makedirs('static/js', exist_ok=True)
-os.makedirs('static/audio', exist_ok=True)
-os.makedirs('templates', exist_ok=True)
-
 
 # Attack patterns database
 ATTACK_PATTERNS = {
@@ -161,7 +127,6 @@ ATTACK_PATTERNS = {
     }
 }
 
-
 # Mock Feature Extractor Class
 class MockFeatureExtractor:
     @staticmethod
@@ -177,7 +142,6 @@ class MockFeatureExtractor:
             'method': request_data.get('method', 'GET'),
             'src_ip': request_data.get('src_ip', '0.0.0.0')
         }
-
 
 # Mock Detector Class
 class MockDetector:
@@ -218,16 +182,13 @@ class MockDetector:
             'threat_types': threat_types
         }
 
-
 # Initialize mock models
 feature_extractor = MockFeatureExtractor()
 detector = MockDetector()
-model_loaded = True
-
 
 def generate_modsecurity_rule(attack_type, pattern):
     """Generate ModSecurity rule for detected attack"""
-    rule_id = 100000 + len(suggested_rules) + 1
+    rule_id = 100000 + random.randint(1, 999999)
     
     attack_info = ATTACK_PATTERNS.get(attack_type, {})
     severity = attack_info.get('severity', 'MEDIUM')
@@ -238,8 +199,8 @@ def generate_modsecurity_rule(attack_type, pattern):
     phase:2,\
     t:none,\
     msg:'ML-Augmented WAF: {attack_info.get('name', attack_type)} Detected',\
-    severity:''{severity}"',\
-    deny:\
+    severity:'{severity}',\
+    deny,\
     log,\
     status:403"
 """
@@ -255,28 +216,26 @@ def generate_modsecurity_rule(attack_type, pattern):
         'status': 'pending'
     }
 
-
+# ────────────────────────────────────────────────
 # Routes
+# ────────────────────────────────────────────────
+
 @app.route('/')
 def index():
     return jsonify({"status": "ML-Augmented WAF running"})
-
 
 @app.route('/static/audio/<path:filename>')
 def serve_audio(filename):
     """Serve audio files"""
     return send_from_directory(os.path.join(app.root_path, 'static/audio'), filename)
 
-
 @app.route('/api/health')
 def health_check():
     """Health check endpoint"""
     return jsonify({
         'status': 'healthy',
-        'model_loaded': model_loaded,
         'timestamp': datetime.now().isoformat()
     })
-
 
 @app.route('/api/attack_types')
 def get_attack_types():
@@ -291,12 +250,9 @@ def get_attack_types():
         })
     return jsonify(attack_types)
 
-
 @app.route('/api/simulate_attack', methods=['POST'])
 def simulate_attack():
-    """Simulate an attack in real-time"""
-    global metrics_data, anomalies_list
-    
+    """Simulate an attack in real-time — no persistent state on server"""
     data = request.get_json()
     attack_type = data.get('attack_type')
     
@@ -306,17 +262,12 @@ def simulate_attack():
     attack_info = ATTACK_PATTERNS[attack_type]
     patterns = attack_info['patterns']
     
-    # Simulate multiple requests with attack patterns
     results = []
-    num_requests = min(5, len(patterns))  if patterns else 5
+    num_requests = min(5, len(patterns)) if patterns else 5
     
     for i in range(num_requests):
-        if patterns:
-            pattern = patterns[i % len(patterns)]
-            url = f"/api/test?param={pattern}"
-        else:
-            url = "/api/test"
-            pattern = ""
+        pattern = patterns[i % len(patterns)] if patterns else ""
+        url = f"/api/test?param={pattern}" if pattern else "/api/test"
         
         request_data = {
             'method': 'GET',
@@ -324,44 +275,29 @@ def simulate_attack():
             'src_ip': f"192.168.1.{random.randint(100, 255)}"
         }
         
-        # Extract features
         features = feature_extractor.extract(request_data)
-        
-        # Predict
         result = detector.predict(features)
         
-        # Update metrics
-        metrics_data['total_requests'] += 1
+        anomaly_data = None
         if result['is_anomaly']:
-            metrics_data['anomalies_detected'] += 1
-            metrics_data['blocked_requests'] += 1
-        
-        # Create anomaly record
-        anomaly_data = {
-            'id': len(anomalies_list) + 1,
-            'timestamp': datetime.now().isoformat(),
-            'url': request_data['url'],
-            'method': request_data['method'],
-            'src_ip': request_data['src_ip'],
-            'confidence': result['confidence'],
-            'threat_types': result['threat_types'],
-            'severity': attack_info['severity'],
-            'blocked': result['is_anomaly']
-        }
-        
-        if result['is_anomaly']:
-            anomalies_list.append(anomaly_data)
+            anomaly_data = {
+                'id': i + 1,
+                'timestamp': datetime.now().isoformat(),
+                'url': request_data['url'],
+                'method': request_data['method'],
+                'src_ip': request_data['src_ip'],
+                'confidence': result['confidence'],
+                'threat_types': result['threat_types'],
+                'severity': attack_info['severity'],
+                'blocked': True
+            }
+            # Emit so client can add to its own list immediately
+            socketio.emit('new_anomaly', anomaly_data)
             
-            # Generate rule suggestion
+            # Optional: emit rule suggestion
             if pattern:
                 rule = generate_modsecurity_rule(attack_type, pattern)
-                suggested_rules.append(rule)
-                
-                # Emit rule suggestion to clients
                 socketio.emit('rule_suggestion', rule)
-            
-            # Emit anomaly to clients
-            socketio.emit('new_anomaly', anomaly_data)
         
         results.append({
             'request': request_data,
@@ -370,7 +306,7 @@ def simulate_attack():
             'threat_types': result['threat_types']
         })
         
-        # Small delay for real-time effect
+        # Small delay for real-time feel
         time.sleep(0.5)
     
     return jsonify({
@@ -380,37 +316,19 @@ def simulate_attack():
         'results': results
     })
 
-
 @app.route('/api/analyze', methods=['POST'])
 def analyze_request():
-    """Analyze an HTTP request for anomalies"""
-    global metrics_data, anomalies_list
-    
+    """Analyze an HTTP request for anomalies — no persistent state"""
     start_time = time.time()
     
     try:
         data = request.get_json()
         
-        # Extract features
         features = feature_extractor.extract(data)
-        
-        # Predict
         result = detector.predict(features)
         
         processing_time = (time.time() - start_time) * 1000
         
-        # Update metrics
-        metrics_data['total_requests'] += 1
-        if result['is_anomaly']:
-            metrics_data['anomalies_detected'] += 1
-            metrics_data['blocked_requests'] += 1
-        
-        metrics_data['avg_latency'] = (
-            (metrics_data['avg_latency'] * (metrics_data['total_requests'] - 1) + processing_time)
-            / metrics_data['total_requests']
-        )
-        
-        # Create response
         response = {
             'is_anomaly': result['is_anomaly'],
             'confidence': result['confidence'],
@@ -422,10 +340,10 @@ def analyze_request():
             'timestamp': datetime.now().isoformat()
         }
         
-        # Log anomaly
+        # Emit anomaly so client can update its own display
         if result['is_anomaly']:
             anomaly_data = {
-                'id': len(anomalies_list) + 1,
+                'id': int(time.time() * 1000),  # simple unique-ish id
                 'timestamp': response['timestamp'],
                 'url': data.get('url', ''),
                 'method': data.get('method', 'GET'),
@@ -434,117 +352,61 @@ def analyze_request():
                 'threat_types': result['threat_types'],
                 'blocked': True
             }
-            anomalies_list.append(anomaly_data)
-            
-            # Emit to WebSocket clients
             socketio.emit('new_anomaly', anomaly_data)
         
         return jsonify(response)
-        
+    
     except Exception as e:
         logger.error(f"Error analyzing request: {str(e)}")
         return jsonify({'error': str(e)}), 500
 
+# ────────────────────────────────────────────────
+# Always return empty / initial values — client handles real state
+# ────────────────────────────────────────────────
 
 @app.route('/api/metrics')
 def get_metrics():
-    """Get system metrics"""
-    return jsonify(metrics_data)
-
+    return jsonify({
+        'total_requests': 0,
+        'anomalies_detected': 0,
+        'false_positives': 0,
+        'avg_latency': 0.0,
+        'detection_accuracy': 98.3,
+        'false_positive_rate': 2.1,
+        'throughput': 12000,
+        'blocked_requests': 0
+    })
 
 @app.route('/api/anomalies')
 def get_anomalies():
-    """Get list of detected anomalies"""
     limit = request.args.get('limit', 10, type=int)
-    return jsonify(anomalies_list[-limit:])
-
+    return jsonify([])
 
 @app.route('/api/rules')
 def get_rules():
-    """Get suggested and active rules"""
     return jsonify({
-        'suggested': suggested_rules,
-        'active': waf_rules
+        'suggested': [],
+        'active': []
     })
-
 
 @app.route('/api/rules/approve', methods=['POST'])
 def approve_rule():
-    """Approve and activate a suggested rule"""
-    global suggested_rules, waf_rules
-    
-    try:
-        data = request.get_json()
-        rule_id = data.get('rule_id')
-        
-        # Find the rule in suggested rules
-        rule = next((r for r in suggested_rules if r['id'] == rule_id), None)
-        
-        if not rule:
-            return jsonify({'error': 'Rule not found'}), 404
-        
-        # Update rule status
-        rule['status'] = 'active'
-        rule['activated_at'] = datetime.now().isoformat()
-        
-        # Move to active rules
-        waf_rules.append(rule)
-        
-        # Remove from suggested rules
-        suggested_rules = [r for r in suggested_rules if r['id'] != rule_id]
-        
-        # Emit update to clients
-        socketio.emit('rule_activated', rule)
-        
-        return jsonify({
-            'status': 'success',
-            'message': 'Rule activated successfully',
-            'rule': rule
-        })
-        
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
+    return jsonify({'status': 'ignored', 'message': 'No server-side state — handle approval in browser'})
 
 @app.route('/api/rules/dismiss', methods=['POST'])
 def dismiss_rule():
-    """Dismiss a suggested rule"""
-    global suggested_rules
-    
-    try:
-        data = request.get_json()
-        rule_id = data.get('rule_id')
-        
-        # Remove from suggested rules
-        suggested_rules = [r for r in suggested_rules if r['id'] != rule_id]
-        
-        return jsonify({'status': 'success'})
-        
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
+    return jsonify({'status': 'ignored', 'message': 'No server-side state — handle dismissal in browser'})
 
 @app.route('/api/feedback', methods=['POST'])
 def submit_feedback():
-    """Submit feedback on anomaly detection"""
-    global metrics_data
-    
+    # Optional — still log feedback if you want
     try:
         data = request.get_json()
-        
-        # Update false positive count
-        if not data.get('is_true_positive', True):
-            metrics_data['false_positives'] += 1
-        
-        # Log feedback
         with open('logs/feedback.jsonl', 'a') as f:
             f.write(json.dumps(data) + '\n')
-        
         return jsonify({'status': 'success'})
-        
     except Exception as e:
         return jsonify({'error': str(e)}), 500
-
 
 # WebSocket events
 @socketio.on('connect')
@@ -552,20 +414,10 @@ def handle_connect():
     logger.info('Client connected')
     emit('connection_response', {'status': 'connected'})
 
-
 @socketio.on('disconnect')
 def handle_disconnect():
     logger.info('Client disconnected')
 
-
-@socketio.on('request_metrics')
-def handle_metrics_request():
-    emit('metrics_update', metrics_data)
-
-
 if __name__ == '__main__':
-    logger.info("Starting ML-Augmented WAF Server...")
-    logger.info("Dashboard: http://localhost:5000")
-    logger.info("API: http://localhost:5000/api")
-    
-    socketio.run(app, host='0.0.0.0', port=5000, debug=False)   
+    logger.info("Starting ML-Augmented WAF Server (reset-on-reload mode)...")
+    socketio.run(app, host='0.0.0.0', port=5000, debug=False)
