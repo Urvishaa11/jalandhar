@@ -1,0 +1,8 @@
+flask
+flask-cors
+flask-socketio
+gunicorn
+eventlet
+numpy
+pandas
+joblib
